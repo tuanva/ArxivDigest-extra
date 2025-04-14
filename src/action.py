@@ -9,6 +9,8 @@ import openai
 from relevancy import generate_relevance_score, process_subject_fields
 from download_new_papers import get_papers
 from datetime import date
+import requests
+from typing import List, Dict, Any
 
 import ssl
 
@@ -279,6 +281,85 @@ def generate_body(topic, categories, interest, threshold):
         )
     return body
 
+def generate_messages(topic, categories, interest, threshold):
+    """
+    Generate a list of relevant papers based on topic, categories, and interest.
+    Returns a list of dictionaries containing paper information.
+    """
+    if topic == "Physics":
+        raise RuntimeError("You must choose a physics subtopic.")
+    elif topic in physics_topics:
+        abbr = physics_topics[topic]
+    elif topic in topics:
+        abbr = topics[topic]
+    else:
+        raise RuntimeError(f"Invalid topic {topic}")
+
+    # Get papers based on topic and categories
+    if categories:
+        for category in categories:
+            if category not in category_map[topic]:
+                raise RuntimeError(f"{category} is not a category of {topic}")
+        papers = get_papers(abbr)
+        papers = [
+            t
+            for t in papers
+            if bool(set(process_subject_fields(t["subjects"])) & set(categories))
+        ]
+    else:
+        papers = get_papers(abbr)
+
+    # Apply relevancy filtering if interest is specified
+    if interest:
+        relevancy, _ = generate_relevance_score(
+            papers,
+            query={"interest": interest},
+            threshold_score=threshold,
+            num_paper_in_prompt=2,
+        )
+        return relevancy
+    
+    return papers
+
+def send_to_telegram(messages: List[Dict[str, Any]], bot_token: str, chat_id: str) -> bool:
+    """
+    Send paper summaries to a Telegram channel
+    """
+    success = True
+    base_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+
+    for paper in messages:
+        # Create a formatted message for each paper
+        message = (
+            f"*Title:* [{paper['title']}]({paper.get('main_page', '')})\n"
+            f"*Authors:* {paper.get('authors', 'N/A')}\n"
+            f"*Score:* {paper.get('Relevancy score', 'N/A')}\n\n"
+        )
+
+        if "Reasons for match" in paper:
+            message += f"*Why this paper matters:*\n{paper['Reasons for match']}\n\n"
+
+        if "abstract" in paper:
+            message += f"*Abstract:*\n{paper['abstract'][:500]}...\n\n"
+
+        # Send message with markdown formatting
+        try:
+            payload = {
+                'chat_id': chat_id,
+                'text': message,
+                'parse_mode': 'Markdown',
+                'disable_web_page_preview': False
+            }
+            response = requests.post(base_url, json=payload)
+            if not response.ok:
+                print(f"Failed to send message to Telegram: {response.text}")
+                success = False
+        except Exception as e:
+            print(f"Error sending to Telegram: {str(e)}")
+            success = False
+            
+    return success
+
 def get_date():
     today = date.today()
     formatted_date = today.strftime("%d%m%Y")
@@ -291,7 +372,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "--config", help="yaml config file to use", default="config.yaml"
     )
+    parser.add_argument(
+        "--telegram", action="store_true", help="Send digest to Telegram channel"
+    )
     args = parser.parse_args()
+    
     with open(args.config, "r") as f:
         config = yaml.safe_load(f)
 
@@ -301,28 +386,46 @@ if __name__ == "__main__":
 
     topic = config["topic"]
     categories = config["categories"]
-    from_email = os.environ.get("FROM_EMAIL")
-    to_email = os.environ.get("TO_EMAIL")
     threshold = config["threshold"]
     interest = config["interest"]
+    
+    # Generate both HTML body and message list
     body = generate_body(topic, categories, interest, threshold)
+    messages = generate_messages(topic, categories, interest, threshold)
+    
     today_date = get_date()
     with open(f"digest_{today_date}.html", "w") as f:
         f.write(body)
+
+    # Handle email sending if configured
     if os.environ.get("SENDGRID_API_KEY", None):
+        from_email = os.environ.get("FROM_EMAIL")
+        to_email = os.environ.get("TO_EMAIL")
         sg = SendGridAPIClient(api_key=os.environ.get("SENDGRID_API_KEY"))
-        from_email = Email(from_email)  # Change to your verified sender
+        from_email = Email(from_email)
         to_email = To(to_email)
         subject = date.today().strftime("Personalized arXiv Digest, %d %b %Y")
         content = Content("text/html", body)
         mail = Mail(from_email, to_email, subject, content)
         mail_json = mail.get()
 
-        # Send an HTTP POST request to /mail/send
         response = sg.client.mail.send.post(request_body=mail_json)
         if response.status_code >= 200 and response.status_code <= 300:
             print("Send test email: Success!")
         else:
-            print("Send test email: Failure ({response.status_code}, {response.text})")
+            print(f"Send test email: Failure ({response.status_code}, {response.text})")
     else:
         print("No sendgrid api key found. Skipping email")
+
+    # Handle Telegram sending if configured
+    if args.telegram:
+        bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+        chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+        
+        if not bot_token or not chat_id:
+            print("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID environment variables. Skipping Telegram.")
+        else:
+            if send_to_telegram(messages, bot_token, chat_id):
+                print("Successfully sent digest to Telegram channel")
+            else:
+                print("Failed to send some messages to Telegram channel")

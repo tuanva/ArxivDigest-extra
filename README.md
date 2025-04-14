@@ -118,6 +118,33 @@ interest: |
   5. AI Red teaming, deception and misalignment
 ```
 
+## 🔧 Setting Up Virtual Environment
+
+Before running the application, it's recommended to set up a Python virtual environment:
+
+```bash
+# Create a virtual environment
+python -m venv .venv
+
+# Activate the virtual environment
+# On Linux/macOS:
+source .venv/bin/activate
+# On Windows:
+# .venv\Scripts\activate
+
+# Install requirements
+pip install -r requirements.txt
+
+# To deactivate when you're done
+# deactivate
+```
+
+**Why use a virtual environment?**
+- Isolates project dependencies
+- Prevents conflicts between different projects
+- Makes it easier to manage package versions
+- Ensures reproducibility across different machines
+
 ### Running the Web Interface
 
 To run locally with the simplified UI:
